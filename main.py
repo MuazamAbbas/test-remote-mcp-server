@@ -1,59 +1,177 @@
-#Sample Server **********************************************************
-
 from fastmcp import FastMCP
-import random
-import json
+import os
+import sqlite3
+from datetime import datetime
+
+# Database path
+DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
+
+# Create MCP instance
+mcp = FastMCP(name="Expense Tracker Server")
 
 
-# Create a FastMCP server instance
-mcp = FastMCP("Simple Calculator Server")
+# -----------------------------
+# DATABASE INITIALIZATION
+# -----------------------------
+def init_db():
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                subcategory TEXT DEFAULT '',
+                note TEXT DEFAULT ''
+            )
+        """)
 
-#Tool: Add two numbers
-@mcp.tool("add_numbers")
-def add_numbers(a: int, b: int) -> int:
-    """Add two numbers and return the result.
-    
-    Args:
-        a (int): The first number to add.
-        b (int): The second number to add.
-    
-    Returns:
-        int: The sum of the two numbers.
+
+init_db()
+
+
+# -----------------------------
+# VALIDATION HELPERS
+# -----------------------------
+def validate_date(date_str: str):
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Date must be in YYYY-MM-DD format")
+
+
+def validate_amount(amount: float):
+    if amount <= 0:
+        raise ValueError("Amount must be greater than 0")
+
+
+def validate_category(category: str):
+    if not category:
+        raise ValueError("Category is required")
+
+
+# -----------------------------
+# TOOLS
+# -----------------------------
+
+# Add Expense
+@mcp.tool(name="add_expense", description="Add a new expense.")
+def add_expense(date: str, amount: float, category: str, subcategory: str = "", note: str = ""):
+    validate_date(date)
+    validate_amount(amount)
+    validate_category(category)
+
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute(
+            "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?, ?, ?, ?, ?)",
+            (date, amount, category, subcategory, note)
+        )
+        return {"status": "ok", "id": cur.lastrowid}
+
+
+# List Expenses by Date Range
+@mcp.tool(name="list_expenses", description="List expenses within a date range.")
+def list_expenses(start_date: str, end_date: str) -> list[dict]:
+    validate_date(start_date)
+    validate_date(end_date)
+
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("""
+            SELECT id, date, amount, category, subcategory, note
+            FROM expenses
+            WHERE date BETWEEN ? AND ?
+            ORDER BY date ASC
+        """, (start_date, end_date))
+
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+# Summarize by Category
+@mcp.tool(name="summarize_expenses", description="Summarize expenses by category.")
+def summarize_expenses(start_date: str, end_date: str, category: str = None) -> list[dict]:
+    validate_date(start_date)
+    validate_date(end_date)
+
+    query = """
+        SELECT category, SUM(amount) as total_amount
+        FROM expenses
+        WHERE date BETWEEN ? AND ?
     """
-    return a + b
+
+    params = [start_date, end_date]
+
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+
+    query += " GROUP BY category ORDER BY total_amount DESC"
+
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute(query, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-#Tool: Generate a random number
-@mcp.tool("generate_random_number")
-def generate_random_number(min_value: int = 1, max_value: int = 100) -> int:
-    """Generate a random number between the specified minimum and maximum values.
+# Monthly Summary
+@mcp.tool(name="monthly_summary", description="Get total expenses for a given month.")
+def monthly_summary(year: int, month: int):
+    if month < 1 or month > 12:
+        raise ValueError("Month must be between 1 and 12")
 
-    Args:
-        min_value (int, optional): The minimum value for the random number. Defaults to 1.
-        max_value (int, optional): The maximum value for the random number. Defaults to 100.
+    month_str = f"{year:04d}-{month:02d}"
 
-    Returns:
-        int: The random integer between min_value and max_value.
-    """
-    return random.randint(min_value, max_value)
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("""
+            SELECT SUM(amount)
+            FROM expenses
+            WHERE strftime('%Y-%m', date) = ?
+        """, (month_str,))
 
-#Resource: Get server information
-@mcp.resource("info://server")
-def get_server_info() -> str:
-    """Get information about the server.
+        total = cur.fetchone()[0] or 0
+        return {"year": year, "month": month, "total": total}
 
-    Returns:
-        str: A JSON string containing server information.
-    """
-    info = {
-        "name": "Simple Calculator Server",
-        "version": "1.0.0",
-        "description": "A basic MCP server with math tools",
-        "tools": ["add_numbers", "generate_random_number"],
-        "authors": "Your Name"
-    }
-    return json.dumps(info, indent=2)
 
-#Start the server
+# Top Categories
+@mcp.tool(name="top_categories", description="Get top spending categories.")
+def top_categories(limit: int = 3):
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("""
+            SELECT category, SUM(amount) as total
+            FROM expenses
+            GROUP BY category
+            ORDER BY total DESC
+            LIMIT ?
+        """, (limit,))
+
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+# Delete Expense
+@mcp.tool(name="delete_expense", description="Delete an expense by ID.")
+def delete_expense(expense_id: int):
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        if cur.rowcount == 0:
+            return {"status": "not_found"}
+        return {"status": "deleted"}
+
+
+# -----------------------------
+# RESOURCES
+# -----------------------------
+
+@mcp.resource("expense://categories", mime_type="application/json")
+def list_categories():
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("SELECT DISTINCT category FROM expenses")
+        return [r[0] for r in cur.fetchall()]
+
+
+# -----------------------------
+# RUN SERVER
+# -----------------------------
+
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
