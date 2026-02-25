@@ -15,14 +15,13 @@ from fastmcp import FastMCP
 import os
 import tempfile
 import aiosqlite
-import asyncio
 from datetime import datetime
 
 # --------------------------------------------------
 # DATABASE CONFIG
 # --------------------------------------------------
 
-# Use system temp directory (Cloud platforms safe)
+# Cloud-safe writable path
 DB_PATH = os.path.join(tempfile.gettempdir(), "expenses.db")
 
 # Create MCP server instance
@@ -33,21 +32,21 @@ db: aiosqlite.Connection | None = None
 
 
 # --------------------------------------------------
-# STARTUP: Initialize async database
+# MCP LIFECYCLE EVENTS (IMPORTANT FOR CLOUD)
 # --------------------------------------------------
 
-async def startup():
+@mcp.on_startup
+async def on_startup():
     """
-    Runs once when server starts.
-    Creates database + table if not exists.
+    Runs automatically when MCP server starts.
+    Initializes database connection + table.
     """
     global db
+
     db = await aiosqlite.connect(DB_PATH)
 
-    # Enable better concurrency
     await db.execute("PRAGMA journal_mode=WAL")
 
-    # Create table
     await db.execute("""
         CREATE TABLE IF NOT EXISTS expenses(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,14 +61,10 @@ async def startup():
     await db.commit()
 
 
-# --------------------------------------------------
-# SHUTDOWN: Close DB cleanly
-# --------------------------------------------------
-
-async def shutdown():
+@mcp.on_shutdown
+async def on_shutdown():
     """
-    Runs when server stops.
-    Closes DB connection properly.
+    Runs automatically when MCP server shuts down.
     """
     global db
     if db:
@@ -103,10 +98,6 @@ async def add_expense(
     subcategory: str = "",
     note: str = ""
 ):
-    """
-    Add a new expense record.
-    """
-
     validate_date(date)
     validate_amount(amount)
 
@@ -120,15 +111,11 @@ async def add_expense(
 
 
 # --------------------------------------------------
-# TOOL: List Expenses Between Dates
+# TOOL: List Expenses
 # --------------------------------------------------
 
 @mcp.tool()
 async def list_expenses(start_date: str, end_date: str):
-    """
-    List expenses between two dates.
-    """
-
     validate_date(start_date)
     validate_date(end_date)
 
@@ -151,9 +138,6 @@ async def list_expenses(start_date: str, end_date: str):
 
 @mcp.tool()
 async def delete_expense(expense_id: int):
-    """
-    Delete expense by ID.
-    """
 
     cur = await db.execute(
         "DELETE FROM expenses WHERE id = ?",
@@ -180,9 +164,6 @@ async def update_expense(
     subcategory: str = "",
     note: str = ""
 ):
-    """
-    Update an existing expense.
-    """
 
     validate_date(date)
     validate_amount(amount)
@@ -207,9 +188,6 @@ async def update_expense(
 
 @mcp.tool()
 async def summary_by_category(start_date: str, end_date: str):
-    """
-    Get total spending grouped by category.
-    """
 
     validate_date(start_date)
     validate_date(end_date)
@@ -236,13 +214,9 @@ async def summary_by_category(start_date: str, end_date: str):
 
 @mcp.resource("monthly-summary")
 async def monthly_summary(year: int, month: int):
-    """
-    Get total expense for a specific month.
-    """
 
     start = f"{year}-{month:02d}-01"
 
-    # Calculate next month start
     if month == 12:
         end = f"{year+1}-01-01"
     else:
@@ -264,21 +238,8 @@ async def monthly_summary(year: int, month: int):
 
 
 # --------------------------------------------------
-# MAIN EVENT LOOP (PROPER ASYNC START)
+# LOCAL RUN (Cloud ignores this)
 # --------------------------------------------------
-
-async def main():
-    await startup()
-    await mcp.run_async()
-    await shutdown()
-
-
-# --------------------------------------------------
-# ENTRY POINT
-# --------------------------------------------------
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
